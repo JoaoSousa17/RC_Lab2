@@ -7,17 +7,22 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <libgen.h>
+#include <errno.h>
+#include <time.h>
 
 #define MAX_LENGTH 1024
+#define BUFFER_SIZE 8192
 #define FTP_PORT 21
-#define DEBUG 1  // Ativar mensagens de debug
+#define DEBUG 1
+#define MAX_ATTEMPTS 3
+#define TIMEOUT_SECONDS 10
 
 // FTP response codes
 #define FTP_CODE_LOGIN_SUCCESS 230
 #define FTP_CODE_PASSIVE_SUCCESS 227
 #define FTP_CODE_TRANSFER_COMPLETE 226
 #define FTP_CODE_FILE_OK 150
-#define FTP_CODE_TRANSFER_START 125  // Adicionando este código
+#define FTP_CODE_TRANSFER_START 125
 
 typedef struct {
     char* user;
@@ -34,10 +39,25 @@ int readResponse(int sockfd, char* response);
 int getResponseCode(const char* response);
 int enterPassiveMode(int sockfd, char* ip, int* port);
 void cleanupURL(URL* url);
+void setSocketTimeout(int sockfd, int seconds);
 
 void debugPrint(const char* msg, const char* info) {
     if (DEBUG) {
         fprintf(stderr, "DEBUG: %s %s\n", msg, info ? info : "");
+    }
+}
+
+void setSocketTimeout(int sockfd, int seconds) {
+    struct timeval timeout;
+    timeout.tv_sec = seconds;
+    timeout.tv_usec = 0;
+    
+    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        perror("setsockopt failed\n");
+    }
+    
+    if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+        perror("setsockopt failed\n");
     }
 }
 
@@ -67,6 +87,7 @@ int main(int argc, char* argv[]) {
         cleanupURL(&parsedUrl);
         exit(1);
     }
+    
     char* ip = inet_ntoa(*((struct in_addr*)h->h_addr));
     debugPrint("IP address:", ip);
 
@@ -77,6 +98,7 @@ int main(int argc, char* argv[]) {
         cleanupURL(&parsedUrl);
         exit(1);
     }
+    
     debugPrint("Connected to control port", "21");
 
     char response[MAX_LENGTH];
@@ -87,6 +109,7 @@ int main(int argc, char* argv[]) {
         cleanupURL(&parsedUrl);
         exit(1);
     }
+    
     debugPrint("Initial response:", response);
 
     // Login process
@@ -95,6 +118,7 @@ int main(int argc, char* argv[]) {
     snprintf(command, sizeof(command), "USER %s\r\n", 
              parsedUrl.user ? parsedUrl.user : "anonymous");
     debugPrint("Sending USER command:", command);
+    
     if (sendCommand(controlSocket, command, response) < 0) {
         debugPrint("USER command failed:", response);
         close(controlSocket);
@@ -107,7 +131,8 @@ int main(int argc, char* argv[]) {
     snprintf(command, sizeof(command), "PASS %s\r\n", 
              parsedUrl.password ? parsedUrl.password : "anonymous@");
     debugPrint("Sending PASS command", "****");
-    if (sendCommand(controlSocket, command, response) < 0 || 
+    
+    if (sendCommand(controlSocket, command, response) < 0 ||
         getResponseCode(response) != FTP_CODE_LOGIN_SUCCESS) {
         fprintf(stderr, "Login failed\n");
         debugPrint("PASS response:", response);
@@ -131,12 +156,14 @@ int main(int argc, char* argv[]) {
     char pasvIP[16];
     int pasvPort;
     debugPrint("Entering passive mode", "");
+    
     if (enterPassiveMode(controlSocket, pasvIP, &pasvPort) < 0) {
         debugPrint("PASV failed", "");
         close(controlSocket);
         cleanupURL(&parsedUrl);
         exit(1);
     }
+    
     char pasvInfo[50];
     snprintf(pasvInfo, sizeof(pasvInfo), "IP: %s, Port: %d", pasvIP, pasvPort);
     debugPrint("PASV info:", pasvInfo);
@@ -154,6 +181,7 @@ int main(int argc, char* argv[]) {
     // Request file
     snprintf(command, sizeof(command), "RETR %s\r\n", parsedUrl.path);
     debugPrint("Sending RETR command:", command);
+    
     if (sendCommand(controlSocket, command, response) < 0) {
         debugPrint("RETR command failed:", response);
         close(dataSocket);
@@ -163,7 +191,6 @@ int main(int argc, char* argv[]) {
     }
     debugPrint("RETR response:", response);
 
-    // Modificação aqui: aceitar tanto 150 quanto 125 como códigos válidos
     int responseCode = getResponseCode(response);
     if (responseCode != FTP_CODE_FILE_OK && responseCode != FTP_CODE_TRANSFER_START) {
         fprintf(stderr, "Error requesting file: %s\n", response);
@@ -187,11 +214,28 @@ int main(int argc, char* argv[]) {
     debugPrint("Local file opened:", filename);
 
     // Receive data
-    char buffer[MAX_LENGTH];
+    char buffer[BUFFER_SIZE];
     int bytes;
-    int totalBytes = 0;
+    long totalBytes = 0;
+    int retryCount = 0;
+    time_t startTime = time(NULL);
+
     while ((bytes = read(dataSocket, buffer, sizeof(buffer))) > 0) {
         if (fwrite(buffer, 1, bytes, file) < bytes) {
+            if (errno == ENOSPC) {
+                fprintf(stderr, "Error: No space left on device\n");
+                fclose(file);
+                close(dataSocket);
+                close(controlSocket);
+                cleanupURL(&parsedUrl);
+                exit(1);
+            }
+            
+            if (retryCount < MAX_ATTEMPTS) {
+                retryCount++;
+                continue;
+            }
+            
             perror("Error writing to file");
             fclose(file);
             close(dataSocket);
@@ -199,12 +243,35 @@ int main(int argc, char* argv[]) {
             cleanupURL(&parsedUrl);
             exit(1);
         }
+        
         totalBytes += bytes;
         if (DEBUG) {
-            fprintf(stderr, "DEBUG: Received %d bytes, total: %d\n", bytes, totalBytes);
+            fprintf(stderr, "\rDEBUG: Received %ld bytes", totalBytes);
+            fflush(stderr);
+        }
+        
+        retryCount = 0;  // Reset retry counter on successful write
+        
+        // Show transfer speed every 5 seconds
+        time_t now = time(NULL);
+        if (now - startTime >= 5) {
+            double speed = totalBytes / (now - startTime) / 1024.0;
+            fprintf(stderr, "\nTransfer speed: %.2f KB/s\n", speed);
+            startTime = now;
+            totalBytes = 0;
         }
     }
-    debugPrint("Transfer complete. Total bytes:", "");
+
+    if (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        perror("Error reading from socket");
+        fclose(file);
+        close(dataSocket);
+        close(controlSocket);
+        cleanupURL(&parsedUrl);
+        exit(1);
+    }
+
+    debugPrint("\nTransfer complete. Total bytes:", "");
 
     // Close data connection and file
     fclose(file);
@@ -212,7 +279,7 @@ int main(int argc, char* argv[]) {
     debugPrint("Data connection closed", "");
 
     // Read transfer complete message
-    if (readResponse(controlSocket, response) < 0 || 
+    if (readResponse(controlSocket, response) < 0 ||
         getResponseCode(response) != FTP_CODE_TRANSFER_COMPLETE) {
         fprintf(stderr, "Transfer failed\n");
         debugPrint("Transfer completion response:", response);
@@ -272,26 +339,35 @@ int parseURL(const char* url, URL* parsedUrl) {
 int connectToServer(const char* ip, int port) {
     int sockfd;
     struct sockaddr_in server_addr;
-
-    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        return -1;
-    }
-
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
+    int attempt = 0;
     
-    if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
+    while (attempt < MAX_ATTEMPTS) {
+        if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+            return -1;
+        }
+        
+        // Set socket timeout
+        setSocketTimeout(sockfd, TIMEOUT_SECONDS);
+        
+        memset(&server_addr, 0, sizeof(server_addr));
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(port);
+        
+        if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
+            close(sockfd);
+            return -1;
+        }
+        
+        if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == 0) {
+            return sockfd;
+        }
+        
         close(sockfd);
-        return -1;
+        attempt++;
+        sleep(1); // Wait 1 second before trying again
     }
-
-    if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        close(sockfd);
-        return -1;
-    }
-
-    return sockfd;
+    
+    return -1;
 }
 
 int sendCommand(int sockfd, const char* command, char* response) {
@@ -303,9 +379,26 @@ int sendCommand(int sockfd, const char* command, char* response) {
 
 int readResponse(int sockfd, char* response) {
     memset(response, 0, MAX_LENGTH);
-    int bytes = read(sockfd, response, MAX_LENGTH - 1);
-    if (bytes < 0) return -1;
-    response[bytes] = '\0';
+    char buffer[MAX_LENGTH];
+    int total = 0;
+    int complete = 0;
+    
+    while (!complete && total < MAX_LENGTH - 1) {
+        int bytes = read(sockfd, buffer, sizeof(buffer)-1);
+        if (bytes <= 0) return -1;
+        
+        buffer[bytes] = '\0';
+        strcat(response, buffer);
+        total += bytes;
+        
+        // Check if response is complete (ends with \r\n)
+        if (total >= 2 && 
+            response[total-2] == '\r' && 
+            response[total-1] == '\n') {
+            complete = 1;
+        }
+    }
+    
     return 0;
 }
 
@@ -319,7 +412,7 @@ int getResponseCode(const char* response) {
 
 int enterPassiveMode(int sockfd, char* ip, int* port) {
     char response[MAX_LENGTH];
-    if (sendCommand(sockfd, "PASV\r\n", response) < 0 || 
+    if (sendCommand(sockfd, "PASV\r\n", response) < 0 ||
         getResponseCode(response) != FTP_CODE_PASSIVE_SUCCESS) {
         return -1;
     }
@@ -328,7 +421,7 @@ int enterPassiveMode(int sockfd, char* ip, int* port) {
     char* start = strchr(response, '(');
     if (!start) return -1;
     
-    if (sscanf(start, "(%d,%d,%d,%d,%d,%d)", 
+    if (sscanf(start, "(%d,%d,%d,%d,%d,%d)",
                &ip1, &ip2, &ip3, &ip4, &p1, &p2) != 6) {
         return -1;
     }
