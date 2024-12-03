@@ -1,29 +1,31 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <libgen.h>
-#include <errno.h>
-#include <time.h>
+#include <stdio.h>          // Para funções de input/output
+#include <stdlib.h>         // Para funções gerais como malloc, free
+#include <string.h>         // Para manipulação de strings
+#include <netdb.h>          // Para funções de rede como gethostbyname
+#include <netinet/in.h>     // Para estruturas e funções de rede
+#include <arpa/inet.h>      // Para estruturas e funções de rede
+#include <sys/socket.h>     // Para funcionalidades de sockets
+#include <unistd.h>         // Para funções UNIX como read, write, close
+#include <libgen.h>         // Para função basename
+#include <errno.h>          // Para tratamento de erros
+#include <time.h>           // Para funções relacionadas a tempo
 
-#define MAX_LENGTH 1024
-#define BUFFER_SIZE 8192
-#define FTP_PORT 21
-#define DEBUG 1
-#define MAX_ATTEMPTS 3
-#define TIMEOUT_SECONDS 10
+/* Definições de constantes */
+#define MAX_LENGTH 1024     // Tamanho máximo para buffers gerais
+#define BUFFER_SIZE 8192    // Tamanho do buffer para transferência de dados
+#define FTP_PORT 21         // Porta padrão do FTP
+#define DEBUG 1             // Flag para ativar/desativar mensagens de debug
+#define MAX_ATTEMPTS 3      // Número máximo de tentativas de conexão
+#define TIMEOUT_SECONDS 10  // Tempo limite para operações de socket
 
-// FTP response codes
-#define FTP_CODE_LOGIN_SUCCESS 230
-#define FTP_CODE_PASSIVE_SUCCESS 227
-#define FTP_CODE_TRANSFER_COMPLETE 226
-#define FTP_CODE_FILE_OK 150
-#define FTP_CODE_TRANSFER_START 125
+/* Códigos de resposta do protocolo FTP */
+#define FTP_CODE_LOGIN_SUCCESS 230          // Código de login bem sucedido
+#define FTP_CODE_PASSIVE_SUCCESS 227        // Código de modo passivo aceito
+#define FTP_CODE_TRANSFER_COMPLETE 226      // Código de transferência completa
+#define FTP_CODE_FILE_OK 150                // Código de arquivo pronto para transferência
+#define FTP_CODE_TRANSFER_START 125         // Código de início de transferência
 
+ /* Estrutura para armazenar informações da URL */
 typedef struct {
     char* user;
     char* password;
@@ -31,7 +33,7 @@ typedef struct {
     char* path;
 } URL;
 
-// Function prototypes
+/* Protótipos das funções */
 int parseURL(const char* url, URL* parsedUrl);
 int connectToServer(const char* ip, int port);
 int sendCommand(int sockfd, const char* command, char* response);
@@ -41,25 +43,32 @@ int enterPassiveMode(int sockfd, char* ip, int* port);
 void cleanupURL(URL* url);
 void setSocketTimeout(int sockfd, int seconds);
 
+/*
+ * Função para imprimir mensagens de debug
+ * Só imprime se DEBUG estiver a 1 (linha 17)
+ */
 void debugPrint(const char* msg, const char* info) {
     if (DEBUG) {
         fprintf(stderr, "DEBUG: %s %s\n", msg, info ? info : "");
     }
 }
 
+/*  * Configura os timeouts de leitura e escrita para um socket */
 void setSocketTimeout(int sockfd, int seconds) {
     struct timeval timeout;
     timeout.tv_sec = seconds;
     timeout.tv_usec = 0;
     
+    // Configura timeout para recebimento de dados
     if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
         perror("setsockopt failed\n");
     }
     
+    // Configura timeout para envio de dados
     if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
         perror("setsockopt failed\n");
     }
-}
+} 
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
@@ -297,37 +306,47 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
+/*
+ * Função que analisa uma URL FTP e extrai seus componentes
+ * Parâmetros:
+ *   url: string contendo a URL completa
+ *   parsedUrl: ponteiro para estrutura onde serão armazenados os componentes
+ * Retorno:
+ *   0 em caso de sucesso
+ *   -1 em caso de erro
+ */
 int parseURL(const char* url, URL* parsedUrl) {
-    if (strncmp(url, "ftp://", 6) != 0) {
+    if (strncmp(url, "ftp://", 6) != 0) {       // Verifica se a URL começa com "ftp://"
         return -1;
     }
 
+    // Cria uma cópia da URL sem o prefixo "ftp://"
     char* urlCopy = strdup(url + 6);
     char* cursor = urlCopy;
-    char* at = strchr(cursor, '@');
+    char* at = strchr(cursor, '@');             // Procura pelo caractere '@' que separa credenciais do host
 
+    // Se encontrou '@', processa usuário e senha
     if (at) {
-        // Extract username and password
         *at = '\0';
         char* colon = strchr(cursor, ':');
-        if (colon) {
+        if (colon) {    // Se encontrou ':', separa usuário e senha
             *colon = '\0';
             parsedUrl->user = strdup(cursor);
             parsedUrl->password = strdup(colon + 1);
-        } else {
+        } else {        // Se não encontrou ':', só tem usuário
             parsedUrl->user = strdup(cursor);
             parsedUrl->password = strdup("");
         }
         cursor = at + 1;
     }
 
-    // Extract host and path
+    // Procura '/' que separa host do caminho
     char* slash = strchr(cursor, '/');
-    if (slash) {
+    if (slash) {        // Se encontrou '/', separa host e caminho
         *slash = '\0';
         parsedUrl->host = strdup(cursor);
         parsedUrl->path = strdup(slash + 1);
-    } else {
+    } else {            // Se não encontrou '/', só tem host
         parsedUrl->host = strdup(cursor);
         parsedUrl->path = strdup("");
     }
@@ -336,40 +355,60 @@ int parseURL(const char* url, URL* parsedUrl) {
     return 0;
 }
 
+/*
+ * Função que estabelece conexão com o servidor FTP
+ * Parâmetros:
+ *   ip: endereço IP do servidor
+ *   port: porta para conexão
+ * Retorno:
+ *   descritor do socket em caso de sucesso
+ *   -1 em caso de erro
+ */
 int connectToServer(const char* ip, int port) {
     int sockfd;
     struct sockaddr_in server_addr;
     int attempt = 0;
     
+    // Tenta conectar até MAX_ATTEMPTS vezes
     while (attempt < MAX_ATTEMPTS) {
-        if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {       // Cria um socket TCP/IP
             return -1;
         }
         
-        // Set socket timeout
         setSocketTimeout(sockfd, TIMEOUT_SECONDS);
         
+        // Inicializa estrutura de endereço do servidor
         memset(&server_addr, 0, sizeof(server_addr));
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons(port);
         
-        if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
+        if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {   // Converte IP string para formato binário
             close(sockfd);
             return -1;
         }
         
-        if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == 0) {
+        if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == 0) {    // Tenta estabelecer conexão
             return sockfd;
         }
         
         close(sockfd);
         attempt++;
-        sleep(1); // Wait 1 second before trying again
+        sleep(1);
     }
     
     return -1;
 }
 
+/*
+ * Função que envia um comando FTP para o servidor e lê a resposta
+ * Parâmetros:
+ *   sockfd: descritor do socket
+ *   command: comando FTP a ser enviado
+ *   response: buffer onde será armazenada a resposta
+ * Retorno:
+ *   0 em caso de sucesso
+ *   -1 em caso de erro
+ */
 int sendCommand(int sockfd, const char* command, char* response) {
     if (write(sockfd, command, strlen(command)) < 0) {
         return -1;
@@ -377,21 +416,33 @@ int sendCommand(int sockfd, const char* command, char* response) {
     return readResponse(sockfd, response);
 }
 
+/*
+ * Função que lê a resposta do servidor FTP
+ * Parâmetros:
+ *   sockfd: descritor do socket
+ *   response: buffer onde será armazenada a resposta
+ * Retorno:
+ *   0 em caso de sucesso
+ *   -1 em caso de erro
+ */
 int readResponse(int sockfd, char* response) {
+    // Limpa o buffer de resposta
     memset(response, 0, MAX_LENGTH);
     char buffer[MAX_LENGTH];
     int total = 0;
     int complete = 0;
     
+    // Lê dados até completar a resposta ou atingir limite
     while (!complete && total < MAX_LENGTH - 1) {
         int bytes = read(sockfd, buffer, sizeof(buffer)-1);
         if (bytes <= 0) return -1;
         
         buffer[bytes] = '\0';
+
         strcat(response, buffer);
         total += bytes;
         
-        // Check if response is complete (ends with \r\n)
+        // Verifica se a resposta está completa (termina com \r\n)
         if (total >= 2 && 
             response[total-2] == '\r' && 
             response[total-1] == '\n') {
@@ -402,6 +453,14 @@ int readResponse(int sockfd, char* response) {
     return 0;
 }
 
+/*
+ * Função que extrai o código numérico da resposta FTP
+ * Parâmetros:
+ *   response: string contendo a resposta do servidor
+ * Retorno:
+ *   código numérico em caso de sucesso
+ *   -1 em caso de erro
+ */
 int getResponseCode(const char* response) {
     int code;
     if (sscanf(response, "%d", &code) != 1) {
@@ -410,27 +469,47 @@ int getResponseCode(const char* response) {
     return code;
 }
 
+/*
+ * Função que coloca o servidor em modo passivo
+ * Parâmetros:
+ *   sockfd: descritor do socket
+ *   ip: buffer onde será armazenado o IP para conexão
+ *   port: ponteiro onde será armazenada a porta para conexão
+ * Retorno:
+ *   0 em caso de sucesso
+ *   -1 em caso de erro
+ */
 int enterPassiveMode(int sockfd, char* ip, int* port) {
     char response[MAX_LENGTH];
+
+    // Envia comando PASV e verifica resposta
     if (sendCommand(sockfd, "PASV\r\n", response) < 0 ||
         getResponseCode(response) != FTP_CODE_PASSIVE_SUCCESS) {
         return -1;
     }
 
     int ip1, ip2, ip3, ip4, p1, p2;
+
+    // Localiza início dos números na resposta
     char* start = strchr(response, '(');
     if (!start) return -1;
     
+    // Extrai os 6 números da resposta
     if (sscanf(start, "(%d,%d,%d,%d,%d,%d)",
                &ip1, &ip2, &ip3, &ip4, &p1, &p2) != 6) {
         return -1;
     }
 
-    snprintf(ip, 16, "%d.%d.%d.%d", ip1, ip2, ip3, ip4);
-    *port = p1 * 256 + p2;
+    snprintf(ip, 16, "%d.%d.%d.%d", ip1, ip2, ip3, ip4);    // Monta o IP em formato string
+    *port = p1 * 256 + p2;                                  // Calcula a porta (p1 * 256 + p2)
     return 0;
 }
 
+/*
+ * Função que libera a memória alocada para a estrutura URL
+ * Parâmetros:
+ *   url: ponteiro para a estrutura URL
+ */
 void cleanupURL(URL* url) {
     if (url->user) free(url->user);
     if (url->password) free(url->password);
