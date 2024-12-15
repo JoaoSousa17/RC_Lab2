@@ -70,7 +70,19 @@ void setSocketTimeout(int sockfd, int seconds) {
     }
 } 
 
+/*
+ * Cliente FTP para download de ficheiros de servidores FTP remotos.
+ * Suporta autenticação com username/password ou modo anónimo.
+ * 
+ * Funcionamento:
+ * 1. Faz parse da URL FTP fornecida
+ * 2. Estabelece conexão com o servidor e autentica
+ * 3. Inicia transferência em modo binário e passivo
+ * 4. Faz download do ficheiro com monitorização de progresso
+ * 5. Lida com erros de rede e disco durante a transferência
+ */
 int main(int argc, char* argv[]) {
+    // Verifica se recebeu o argumento correto (URL do FTP)
     if (argc != 2) {
         fprintf(stderr, "Usage: %s ftp://[<user>:<password>@]<host>/<url-path>\n", argv[0]);
         exit(1);
@@ -89,7 +101,7 @@ int main(int argc, char* argv[]) {
     debugPrint("Path:", parsedUrl.path);
     debugPrint("User:", parsedUrl.user ? parsedUrl.user : "anonymous");
 
-    // Get IP from hostname
+    // Resolve o hostname para IP
     struct hostent* h;
     if ((h = gethostbyname(parsedUrl.host)) == NULL) {
         fprintf(stderr, "Error getting host by name\n");
@@ -100,7 +112,7 @@ int main(int argc, char* argv[]) {
     char* ip = inet_ntoa(*((struct in_addr*)h->h_addr));
     debugPrint("IP address:", ip);
 
-    // Connect to control socket
+    // Conecta ao socket de controle na porta 21
     int controlSocket = connectToServer(ip, FTP_PORT);
     if (controlSocket < 0) {
         fprintf(stderr, "Error connecting to server\n");
@@ -111,6 +123,7 @@ int main(int argc, char* argv[]) {
     debugPrint("Connected to control port", "21");
 
     char response[MAX_LENGTH];
+
     // Read initial response
     if (readResponse(controlSocket, response) < 0) {
         debugPrint("Error reading initial response", response);
@@ -121,9 +134,9 @@ int main(int argc, char* argv[]) {
     
     debugPrint("Initial response:", response);
 
-    // Login process
     char command[MAX_LENGTH];
-    // Send username
+
+    // Envia username
     snprintf(command, sizeof(command), "USER %s\r\n", 
              parsedUrl.user ? parsedUrl.user : "anonymous");
     debugPrint("Sending USER command:", command);
@@ -136,7 +149,7 @@ int main(int argc, char* argv[]) {
     }
     debugPrint("USER response:", response);
 
-    // Send password
+    // Envia password
     snprintf(command, sizeof(command), "PASS %s\r\n", 
              parsedUrl.password ? parsedUrl.password : "anonymous@");
     debugPrint("Sending PASS command", "****");
@@ -151,7 +164,7 @@ int main(int argc, char* argv[]) {
     }
     debugPrint("PASS response:", response);
 
-    // Set binary mode
+    // Configura modo binário
     debugPrint("Setting binary mode", "");
     if (sendCommand(controlSocket, "TYPE I\r\n", response) < 0) {
         debugPrint("TYPE I failed:", response);
@@ -161,7 +174,7 @@ int main(int argc, char* argv[]) {
     }
     debugPrint("TYPE I response:", response);
 
-    // Enter passive mode
+    // Entra em modo passivo
     char pasvIP[16];
     int pasvPort;
     debugPrint("Entering passive mode", "");
@@ -177,7 +190,7 @@ int main(int argc, char* argv[]) {
     snprintf(pasvInfo, sizeof(pasvInfo), "IP: %s, Port: %d", pasvIP, pasvPort);
     debugPrint("PASV info:", pasvInfo);
 
-    // Connect data socket
+    // Conecta ao socket de dados
     int dataSocket = connectToServer(pasvIP, pasvPort);
     if (dataSocket < 0) {
         debugPrint("Data connection failed", "");
@@ -187,7 +200,7 @@ int main(int argc, char* argv[]) {
     }
     debugPrint("Data connection established", "");
 
-    // Request file
+    // Solicita o arquivo
     snprintf(command, sizeof(command), "RETR %s\r\n", parsedUrl.path);
     debugPrint("Sending RETR command:", command);
     
@@ -210,7 +223,7 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
-    // Open local file for writing
+    // Abre ficheiro local para escrita
     char* filename = basename(parsedUrl.path);
     FILE* file = fopen(filename, "wb");
     if (!file) {
@@ -222,7 +235,7 @@ int main(int argc, char* argv[]) {
     }
     debugPrint("Local file opened:", filename);
 
-    // Receive data
+    // Variaveis para recebimento de dados
     char buffer[BUFFER_SIZE];
     int bytes;
     long totalBytes = 0;
@@ -230,7 +243,7 @@ int main(int argc, char* argv[]) {
     time_t startTime = time(NULL);
 
     while ((bytes = read(dataSocket, buffer, sizeof(buffer))) > 0) {
-        if (fwrite(buffer, 1, bytes, file) < bytes) {
+        if (fwrite(buffer, 1, bytes, file) < bytes) {   // Tratamento de erros de escrita
             if (errno == ENOSPC) {
                 fprintf(stderr, "Error: No space left on device\n");
                 fclose(file);
@@ -253,15 +266,16 @@ int main(int argc, char* argv[]) {
             exit(1);
         }
         
+        // Mostra velocidade de transferência a cada 5 segundos
         totalBytes += bytes;
         if (DEBUG) {
             fprintf(stderr, "\rDEBUG: Received %ld bytes", totalBytes);
             fflush(stderr);
         }
         
-        retryCount = 0;  // Reset retry counter on successful write
+        retryCount = 0; 
         
-        // Show transfer speed every 5 seconds
+        // Mostra a velocidade da transferência a cada 5 segundos
         time_t now = time(NULL);
         if (now - startTime >= 5) {
             double speed = totalBytes / (now - startTime) / 1024.0;
@@ -271,6 +285,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Verifica erros críticos de leitura do socket, ignorando timeouts temporários
     if (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         perror("Error reading from socket");
         fclose(file);
@@ -282,12 +297,12 @@ int main(int argc, char* argv[]) {
 
     debugPrint("\nTransfer complete. Total bytes:", "");
 
-    // Close data connection and file
+    // Fecha a conexão e o ficheiro
     fclose(file);
     close(dataSocket);
     debugPrint("Data connection closed", "");
 
-    // Read transfer complete message
+    // Lê mensagem de conclusão da transferência
     if (readResponse(controlSocket, response) < 0 ||
         getResponseCode(response) != FTP_CODE_TRANSFER_COMPLETE) {
         fprintf(stderr, "Transfer failed\n");
@@ -298,7 +313,7 @@ int main(int argc, char* argv[]) {
     }
     debugPrint("Transfer completion response:", response);
 
-    // Quit and cleanup
+    // Envia comando QUIT e fecha conexões
     sendCommand(controlSocket, "QUIT\r\n", response);
     close(controlSocket);
     cleanupURL(&parsedUrl);
