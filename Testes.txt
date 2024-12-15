@@ -1,3 +1,8 @@
-URL 1: ftp://ftp.up.pt/pub/gnu/emacs/elisp-manual-21-2.8.tar.gz
-URL 2: ftp://demo:password@test.rebex.net/readme.txt
-URL 3: ftp://anonymous:anonymous@ftp.bit.nl/speedtest/100mb.bin
+PUBLIC SERVERS:
+URL 1: ./download ftp://ftp.up.pt/pub/gnu/emacs/elisp-manual-21-2.8.tar.gz
+URL 2: ./download ftp://demo:password@test.rebex.net/readme.txt
+URL 3: ./download ftp://anonymous:anonymous@ftp.bit.nl/speedtest/100mb.bin
+
+NET LAB:
+URL 1: ./downlaod ftp://rcom:rcom@ftp.netlab.fe.up.pt/pipe.txt
+URL 2: ./downlaod ftp://rcom:rcom@ftp.netlab.fe.up.pt/files/crab.mp4
